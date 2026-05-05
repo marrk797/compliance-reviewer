@@ -1,19 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { DisclaimerBanner } from "@/components/DisclaimerBanner";
-import {
-  ApiError,
+import { getReport } from "@/lib/storage";
+import type {
   ComplianceStatus,
   FindingOut,
   ReportOut,
   RiskLevel,
-  api,
-  getToken,
-} from "@/lib/api";
+} from "@/lib/types";
 
 const STATUS_STYLES: Record<ComplianceStatus, string> = {
   compliant: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -30,30 +27,24 @@ const RISK_STYLES: Record<RiskLevel, string> = {
 };
 
 export default function ReportPage({ params }: { params: { id: string } }) {
-  const router = useRouter();
   const [report, setReport] = useState<ReportOut | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) {
-      router.replace("/login");
-      return;
-    }
-    api
-      .getReport(params.id)
-      .then(setReport)
-      .catch((err) => {
-        const detail = err instanceof ApiError ? err.detail : "Failed to load report";
-        setError(detail);
-      });
-  }, [params.id, router]);
+    const r = getReport(params.id);
+    if (!r) setMissing(true);
+    else setReport(r);
+  }, [params.id]);
 
-  if (error) {
+  if (missing) {
     return (
-      <main className="mx-auto max-w-4xl p-6">
-        <p className="rounded bg-red-50 p-3 text-sm text-red-700">{error}</p>
+      <main className="mx-auto max-w-4xl space-y-3 p-6">
+        <p className="rounded bg-amber-50 p-3 text-sm text-amber-800">
+          Report not found in this browser. Reports are stored in localStorage,
+          so they only exist on the device that ran the review.
+        </p>
         <Link href="/" className="text-sm text-slate-600 underline">
-          Back
+          ← Back to home
         </Link>
       </main>
     );
@@ -65,18 +56,27 @@ export default function ReportPage({ params }: { params: { id: string } }) {
 
   return (
     <main className="mx-auto max-w-4xl space-y-6 p-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <Link href="/" className="text-sm text-slate-500 hover:underline">
-            ← Back
-          </Link>
-          <h1 className="text-2xl font-semibold">Compliance report</h1>
-          <p className="text-sm text-slate-500">
-            ID {report.id} · {report.status}
-            {report.completed_at &&
-              ` · finished ${new Date(report.completed_at).toLocaleString()}`}
+      <header>
+        <Link href="/" className="text-sm text-slate-500 hover:underline">
+          ← Back
+        </Link>
+        <h1 className="text-2xl font-semibold">Compliance report</h1>
+        <p className="text-sm text-slate-500">
+          ID {report.id} · {report.status}
+          {report.completed_at &&
+            ` · finished ${new Date(report.completed_at).toLocaleString()}`}
+        </p>
+        {(report.regulatory_document || report.company_document) && (
+          <p className="mt-1 text-xs text-slate-500">
+            {report.regulatory_document && (
+              <>Regulatory: <code>{report.regulatory_document.filename}</code></>
+            )}
+            {report.regulatory_document && report.company_document && " · "}
+            {report.company_document && (
+              <>Company: <code>{report.company_document.filename}</code></>
+            )}
           </p>
-        </div>
+        )}
       </header>
 
       <DisclaimerBanner />
@@ -126,7 +126,7 @@ function FindingCard({ finding }: { finding: FindingOut }) {
         <span
           className={`rounded border px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[finding.status]}`}
         >
-          {finding.status.replace("_", " ")}
+          {finding.status.replace(/_/g, " ")}
         </span>
         <span
           className={`rounded border px-2 py-0.5 text-xs font-medium ${RISK_STYLES[finding.risk_level]}`}
@@ -164,7 +164,7 @@ function FindingCard({ finding }: { finding: FindingOut }) {
                     : "unsourced"}
                 </span>
                 <blockquote className="mt-1 italic text-slate-700">
-                  “{ev.quote}”
+                  &ldquo;{ev.quote}&rdquo;
                 </blockquote>
               </li>
             ))}

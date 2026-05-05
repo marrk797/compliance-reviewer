@@ -5,113 +5,83 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { DisclaimerBanner } from "@/components/DisclaimerBanner";
+import { runPipeline, type PipelineProgress } from "@/lib/pipeline";
 import {
-  ApiError,
-  ReportOut,
-  api,
-  getToken,
-  setToken,
-} from "@/lib/api";
+  getAcknowledged,
+  getGroqKey,
+  getGroqModel,
+  listReports,
+} from "@/lib/storage";
+import type { ReportOut } from "@/lib/types";
 
 type UploadSlot = {
   file: File | null;
-  documentId: string | null;
-  uploading: boolean;
   error: string | null;
 };
 
-const emptySlot: UploadSlot = {
-  file: null,
-  documentId: null,
-  uploading: false,
-  error: null,
-};
+const emptySlot: UploadSlot = { file: null, error: null };
 
 export default function HomePage() {
   const router = useRouter();
-  const [authChecked, setAuthChecked] = useState(false);
-  const [email, setEmail] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+  const [keyMasked, setKeyMasked] = useState<string | null>(null);
   const [regulatory, setRegulatory] = useState<UploadSlot>(emptySlot);
   const [company, setCompany] = useState<UploadSlot>(emptySlot);
   const [reports, setReports] = useState<ReportOut[]>([]);
-  const [creating, setCreating] = useState(false);
+  const [progress, setProgress] = useState<PipelineProgress | null>(null);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) {
-      router.replace("/login");
+    const key = getGroqKey();
+    if (!key || !getAcknowledged()) {
+      router.replace("/settings");
       return;
     }
-    api
-      .me()
-      .then((user) => {
-        setEmail(user.email);
-        setAuthChecked(true);
-      })
-      .catch(() => {
-        setToken(null);
-        router.replace("/login");
-      });
+    setKeyMasked(`${key.slice(0, 4)}…${key.slice(-4)}`);
+    setReports(listReports());
+    setReady(true);
   }, [router]);
 
-  const refreshReports = useCallback(async () => {
-    try {
-      const data = await api.listReports();
-      setReports(data);
-    } catch (err) {
-      if (err instanceof ApiError) setError(err.detail);
-    }
+  const refresh = useCallback(() => {
+    setReports(listReports());
   }, []);
 
-  useEffect(() => {
-    if (authChecked) void refreshReports();
-  }, [authChecked, refreshReports]);
-
-  const canRunReport = useMemo(
-    () => Boolean(regulatory.documentId && company.documentId && !creating),
-    [regulatory.documentId, company.documentId, creating],
+  const canRun = useMemo(
+    () => Boolean(regulatory.file && company.file && !running),
+    [regulatory.file, company.file, running],
   );
 
-  async function handleUpload(
-    kind: "regulatory" | "company",
-    file: File,
-  ): Promise<void> {
-    const setSlot = kind === "regulatory" ? setRegulatory : setCompany;
-    setSlot({ file, documentId: null, uploading: true, error: null });
-    try {
-      const doc = await api.uploadDocument(file, kind);
-      setSlot({ file, documentId: doc.id, uploading: false, error: null });
-    } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : "Upload failed";
-      setSlot({ file, documentId: null, uploading: false, error: detail });
+  async function handleRun() {
+    if (!regulatory.file || !company.file) return;
+    const apiKey = getGroqKey();
+    if (!apiKey) {
+      router.replace("/settings");
+      return;
     }
-  }
-
-  async function handleCreateReport() {
-    if (!regulatory.documentId || !company.documentId) return;
-    setCreating(true);
+    setRunning(true);
     setError(null);
+    setProgress({ stage: "parse", message: "Starting…" });
     try {
-      const report = await api.createReport(
-        regulatory.documentId,
-        company.documentId,
+      const report = await runPipeline(
+        {
+          regulatoryFile: regulatory.file,
+          companyFile: company.file,
+          apiKey,
+          model: getGroqModel() ?? undefined,
+        },
+        (p) => setProgress(p),
       );
+      refresh();
       router.push(`/reports/${report.id}`);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : "Report failed";
-      setError(detail);
+      setError(err instanceof Error ? err.message : "Pipeline failed");
     } finally {
-      setCreating(false);
+      setRunning(false);
     }
   }
 
-  function logout() {
-    setToken(null);
-    router.replace("/login");
-  }
-
-  if (!authChecked) {
+  if (!ready) {
     return <div className="p-6 text-sm text-slate-500">Loading…</div>;
   }
 
@@ -119,14 +89,16 @@ export default function HomePage() {
     <main className="mx-auto max-w-4xl space-y-6 p-6">
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Compliance Reviewer</h1>
-        <div className="flex items-center gap-3 text-sm">
-          <span className="text-slate-600">{email}</span>
-          <button
-            onClick={logout}
-            className="rounded border border-slate-300 px-3 py-1 hover:bg-slate-100"
+        <div className="flex items-center gap-3 text-xs text-slate-500">
+          <span>
+            Groq key: <code className="font-mono">{keyMasked}</code>
+          </span>
+          <Link
+            href="/settings"
+            className="rounded border border-slate-300 px-3 py-1 text-sm text-slate-700 hover:bg-slate-100"
           >
-            Sign out
-          </button>
+            Settings
+          </Link>
         </div>
       </header>
 
@@ -137,13 +109,13 @@ export default function HomePage() {
           title="1. Regulatory document"
           description="The rules and requirements the submission must satisfy."
           slot={regulatory}
-          onSelect={(file) => handleUpload("regulatory", file)}
+          onSelect={(file) => setRegulatory({ file, error: null })}
         />
         <UploadCard
           title="2. Company submission"
           description="The document you want to check for compliance."
           slot={company}
-          onSelect={(file) => handleUpload("company", file)}
+          onSelect={(file) => setCompany({ file, error: null })}
         />
       </section>
 
@@ -151,19 +123,29 @@ export default function HomePage() {
         <div className="flex items-center justify-between">
           <h2 className="font-medium">Generate compliance report</h2>
           <button
-            onClick={handleCreateReport}
-            disabled={!canRunReport}
+            onClick={handleRun}
+            disabled={!canRun}
             className="rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-400"
           >
-            {creating ? "Running…" : "Run review"}
+            {running ? "Running…" : "Run review"}
           </button>
         </div>
         <p className="mt-2 text-sm text-slate-600">
-          The pipeline runs synchronously for the MVP. Source files are deleted
-          after processing when the privacy mode is enabled on the server.
+          Everything runs in this browser tab. Files never leave your machine;
+          only short retrieved excerpts are sent to Groq for evaluation.
         </p>
+        {progress && (
+          <p className="mt-2 rounded bg-slate-50 p-2 text-sm text-slate-700">
+            <strong>{progress.stage}:</strong> {progress.message}
+            {progress.current !== undefined && progress.total !== undefined && (
+              <> ({progress.current}/{progress.total})</>
+            )}
+          </p>
+        )}
         {error && (
-          <p className="mt-2 rounded bg-red-50 p-2 text-sm text-red-700">{error}</p>
+          <p className="mt-2 rounded bg-red-50 p-2 text-sm text-red-700">
+            {error}
+          </p>
         )}
       </section>
 
@@ -174,7 +156,10 @@ export default function HomePage() {
         ) : (
           <ul className="mt-2 divide-y">
             {reports.map((r) => (
-              <li key={r.id} className="flex items-center justify-between py-2 text-sm">
+              <li
+                key={r.id}
+                className="flex items-center justify-between py-2 text-sm"
+              >
                 <div>
                   <Link
                     href={`/reports/${r.id}`}
@@ -183,6 +168,11 @@ export default function HomePage() {
                     Report {r.id.slice(0, 8)}
                   </Link>
                   <span className="ml-2 text-slate-500">{r.status}</span>
+                  {r.summary && (
+                    <span className="ml-2 text-slate-500">
+                      · {r.summary.total_requirements} reqs
+                    </span>
+                  )}
                 </div>
                 <span className="text-slate-500">
                   {new Date(r.created_at).toLocaleString()}
@@ -205,7 +195,7 @@ function UploadCard({
   title: string;
   description: string;
   slot: UploadSlot;
-  onSelect: (file: File) => void | Promise<void>;
+  onSelect: (file: File) => void;
 }) {
   return (
     <div className="rounded border border-slate-200 bg-white p-4">
@@ -216,16 +206,13 @@ function UploadCard({
         accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
         onChange={(e) => {
           const file = e.target.files?.[0];
-          if (file) void onSelect(file);
+          if (file) onSelect(file);
         }}
         className="mt-3 block w-full text-sm"
       />
-      {slot.uploading && (
-        <p className="mt-2 text-sm text-slate-500">Uploading…</p>
-      )}
-      {slot.documentId && !slot.uploading && (
+      {slot.file && (
         <p className="mt-2 text-sm text-emerald-700">
-          Uploaded ({slot.file?.name})
+          Selected: {slot.file.name} ({Math.round(slot.file.size / 1024)} KB)
         </p>
       )}
       {slot.error && (
