@@ -29,7 +29,11 @@ from app.services.chunking import chunk_text
 from app.services.compliance import ExcerptForEval, evaluate_requirement
 from app.services.parsing import ParsingError, extract_text
 from app.services.requirements import extract_requirements
-from app.services.retrieval import retrieve_relevant_chunks
+from app.services.retrieval import (
+    delete_document_embeddings,
+    retrieve_relevant_chunks,
+    upsert_chunk_embedding,
+)
 from app.services.storage import delete_file
 
 logger = logging.getLogger(__name__)
@@ -89,12 +93,12 @@ def run_compliance_pipeline(
             raise PipelineError("Company document produced no usable chunks.")
 
         embeddings = get_embedding_provider()
-        _embed_requirements(db, requirements, embeddings)
-        _embed_chunks(db, chunks, embeddings)
+        requirement_vectors = _embed_requirements(requirements, embeddings)
+        _embed_and_index_chunks(db, company.id, chunks, embeddings)
         db.commit()
 
         llm = get_llm_provider()
-        _evaluate_all(db, report, requirements, company.id, llm, embeddings)
+        _evaluate_all(db, report, requirements, requirement_vectors, company.id, llm)
 
         report.status = ReportStatus.COMPLETED
         report.completed_at = datetime.now(UTC)
@@ -188,37 +192,46 @@ def _persist_company_chunks(
     return rows
 
 
-def _embed_requirements(db: Session, items: list[Requirement], embeddings) -> None:
+def _embed_requirements(items: list[Requirement], embeddings) -> dict[uuid.UUID, list[float]]:
+    """Embed requirement texts and return them keyed by requirement.id.
+
+    We do *not* persist requirement embeddings; they are used only for
+    retrieval during this pipeline run and are discarded afterwards.
+    """
     if not items:
-        return
+        return {}
     vectors = embeddings.embed([item.text for item in items])
-    for item, vec in zip(items, vectors, strict=True):
-        item.embedding = vec
-    db.flush()
+    return dict(zip([item.id for item in items], vectors, strict=True))
 
 
-def _embed_chunks(db: Session, chunks: list[CompanyChunk], embeddings) -> None:
+def _embed_and_index_chunks(
+    db: Session,
+    company_document_id: uuid.UUID,
+    chunks: list[CompanyChunk],
+    embeddings,
+) -> None:
     if not chunks:
         return
     vectors = embeddings.embed([c.text for c in chunks])
     for chunk, vec in zip(chunks, vectors, strict=True):
-        chunk.embedding = vec
-    db.flush()
+        upsert_chunk_embedding(
+            db,
+            chunk_id=chunk.id,
+            document_id=company_document_id,
+            embedding=vec,
+        )
 
 
 def _evaluate_all(
     db: Session,
     report: Report,
     requirements: list[Requirement],
+    requirement_vectors: dict[uuid.UUID, list[float]],
     company_document_id: uuid.UUID,
     llm,
-    embeddings,
 ) -> None:
     for ordinal, req in enumerate(requirements):
-        query_vec = req.embedding
-        if query_vec is None:
-            query_vec = embeddings.embed([req.text])[0]
-            req.embedding = query_vec
+        query_vec = requirement_vectors[req.id]
         retrieved = retrieve_relevant_chunks(
             db,
             company_document_id=company_document_id,
@@ -289,8 +302,9 @@ def _delete_sources(
             target_id=doc.id,
             meta={"reason": "post_report_privacy"},
         )
-    # Also wipe the chunks/requirements linked to these documents to comply
-    # with "store only the final structured report".
+    # Also wipe the chunks / requirements / vec embeddings linked to these
+    # documents to comply with "store only the final structured report".
+    delete_document_embeddings(db, document_id=company_document_id)
     db.execute(
         Requirement.__table__.delete().where(
             Requirement.document_id.in_([regulatory_document_id, company_document_id])

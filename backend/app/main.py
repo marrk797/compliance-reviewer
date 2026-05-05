@@ -5,12 +5,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.db import init_db
 from app.logging_setup import configure_logging
 from app.routers import auth as auth_router
 from app.routers import reports as reports_router
 from app.routers import uploads as uploads_router
 
 configure_logging()
+init_db()
 
 app = FastAPI(
     title="Compliance Reviewer API",

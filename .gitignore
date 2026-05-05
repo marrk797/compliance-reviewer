@@ -56,4 +56,9 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+data/
 pgdata/
+
+# --- Model caches ---
+.cache/
+fastembed_cache/

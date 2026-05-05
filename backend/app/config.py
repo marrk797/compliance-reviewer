@@ -22,11 +22,8 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- Database ---
-    database_url: str = Field(
-        default="postgresql+psycopg://compliance:compliance@localhost:5432/compliance",
-        alias="DATABASE_URL",
-    )
+    # --- Database (SQLite + sqlite-vec) ---
+    database_path: Path = Field(default=Path("./data/data.sqlite"), alias="DATABASE_PATH")
 
     # --- Auth ---
     jwt_secret: str = Field(default="change-me", alias="JWT_SECRET")
@@ -34,13 +31,23 @@ class Settings(BaseSettings):
     jwt_expires_minutes: int = Field(default=720, alias="JWT_EXPIRES_MINUTES")
 
     # --- LLM ---
-    llm_provider: Literal["openai", "anthropic"] = Field(default="openai", alias="LLM_PROVIDER")
-    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
-    embedding_provider: Literal["openai"] = Field(default="openai", alias="EMBEDDING_PROVIDER")
-    embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
-    embedding_dim: int = Field(default=1536, alias="EMBEDDING_DIM")
+    # Default to Groq because it offers a free, no-credit-card key.
+    llm_provider: Literal["groq", "openai", "anthropic"] = Field(
+        default="groq", alias="LLM_PROVIDER"
+    )
+    llm_model: str = Field(default="llama-3.3-70b-versatile", alias="LLM_MODEL")
+    groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+
+    # --- Embeddings (local, no key) ---
+    embedding_provider: Literal["fastembed", "openai"] = Field(
+        default="fastembed", alias="EMBEDDING_PROVIDER"
+    )
+    embedding_model: str = Field(
+        default="BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL"
+    )
+    embedding_dim: int = Field(default=384, alias="EMBEDDING_DIM")
 
     # --- Privacy / security ---
     delete_source_files_after_processing: bool = Field(
@@ -69,6 +76,12 @@ class Settings(BaseSettings):
     @classmethod
     def _ensure_dir(cls, value: Path) -> Path:
         value.mkdir(parents=True, exist_ok=True)
+        return value
+
+    @field_validator("database_path")
+    @classmethod
+    def _ensure_db_parent(cls, value: Path) -> Path:
+        value.parent.mkdir(parents=True, exist_ok=True)
         return value
 
     @property

@@ -1,18 +1,11 @@
-"""Uploaded document metadata.
-
-We deliberately do not persist the full text of uploaded documents in the
-database; only metadata and (when retention is enabled) a path to the file on
-disk. Once a report is generated, the source file is deleted if
-``DELETE_SOURCE_FILES_AFTER_PROCESSING`` is true.
-"""
+"""Uploaded document metadata."""
 from __future__ import annotations
 
 import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -34,11 +27,9 @@ class DocumentStatus(str, enum.Enum):
 class Document(Base):
     __tablename__ = "documents"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     kind: Mapped[DocumentKind] = mapped_column(
         Enum(DocumentKind, name="document_kind"), nullable=False
