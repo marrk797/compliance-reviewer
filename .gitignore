@@ -17,20 +17,6 @@ tmp/
 !**/sample/*.txt
 !docs/**/*.txt
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-dist/
-build/
-
 # --- Node / Next.js ---
 node_modules/
 .next/
@@ -51,14 +37,3 @@ pnpm-debug.log*
 # --- Logs ---
 *.log
 logs/
-
-# --- Local databases ---
-*.sqlite
-*.sqlite3
-*.db
-data/
-pgdata/
-
-# --- Model caches ---
-.cache/
-fastembed_cache/

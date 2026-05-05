@@ -2,29 +2,35 @@
 
 Guidance for AI coding agents working in this repository.
 
+## Architecture
+
+This is a **browser-only** Next.js application deployed on Vercel. There is no backend service:
+
+- Document parsing (PDF/DOCX/TXT), embedding (Transformers.js / `Xenova/bge-small-en-v1.5`), retrieval, and Groq LLM calls all run in the user's browser.
+- The user pastes their own free Groq API key on the `/settings` page; the key is held only in `localStorage` and is sent only to `api.groq.com`.
+- Generated reports are persisted to `localStorage` so they survive page reloads on the same device.
+
 ## Strict privacy rules — non-negotiable
 
 Anything that would increase the risk of leaking user document content is a **regression**. In particular:
 
-- **Never commit user documents.** `.env`, `uploads/`, `storage/`, `tmp/`, and any `*.pdf` / `*.docx` / `*.txt` file (outside `docs/`) are git-ignored. Do not `git add -f` them.
-- **Never log document contents.** Use `logger.info("…", extra={"contains_document": True})` to mark records that would carry user data; the logging filter in `app/logging_setup.py` drops them. Do not print, log, or echo prompt bodies, response bodies, requirement text, or chunk text from the pipeline.
-- **Never log secrets.** API keys are loaded from environment variables and must not be embedded in error messages, log lines, or commit history.
-- **Never store the full source document in the database.** The schema deliberately stores only requirement text (derived) and chunked passages (derived). After a report is generated, with `DELETE_SOURCE_FILES_AFTER_PROCESSING=true`, both rows are deleted and the file on disk is removed.
-- **Never bypass the auth check on uploads.** All file ingestion routes require `get_current_user`.
-- **Never call an LLM provider with a setting that opts in to training on user data.** This is enforced primarily at the provider account level; do not introduce code paths that send user content to providers without API-mode safeguards.
+- **Never upload user documents to a server.** This app's whole privacy story is "files never leave the browser." Do not introduce server-side upload endpoints, telemetry that includes file contents, or analytics that captures uploaded text.
+- **Never log document contents to a server.** It's fine to use `console.log` for local debugging during development, but never wire those logs to a remote sink.
+- **Never embed a shared API key.** Each user pastes their own Groq key. Do not introduce a shared key, a proxy that injects a key, or any mechanism that lets one user's traffic flow through another's account.
+- **Never commit user documents.** `.env`, `uploads/`, `storage/`, `tmp/`, and any `*.pdf` / `*.docx` / `*.txt` (outside `docs/`) are git-ignored.
+- **Never call an LLM provider with a setting that opts in to training on user data.** Groq does not train on API traffic by default; do not change defaults.
 
 ## Coding conventions
 
-- Backend: Python 3.11+, FastAPI, SQLAlchemy 2.0 ORM. Use `from __future__ import annotations` at the top of every module.
-- Frontend: Next.js 14 App Router, TypeScript strict mode, Tailwind. Prefer client components only where state is needed.
-- Keep services pure where possible; the `routers/*` modules are the only place that should `commit()` SQLAlchemy sessions outside the pipeline.
+- Frontend: Next.js 14 App Router, TypeScript strict mode, Tailwind. Browser-only modules in `frontend/lib/` are pure and side-effect-free at import time; the embedding singleton is gated on `typeof window`.
+- Use `"use client"` for any component that needs `localStorage`, `File`, or the embedding/Groq pipeline.
+- Keep `frontend/lib/` provider-agnostic where possible: `groq.ts` is the only module that knows about Groq specifically.
 
 ## Tests & checks
 
 ```bash
-# backend
-cd backend && pytest && ruff check .
-
-# frontend
-cd frontend && npm run lint && npm run typecheck
+cd frontend
+npm run lint
+npm run typecheck
+npm run build
 ```

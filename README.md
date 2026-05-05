@@ -1,224 +1,152 @@
 # Compliance Reviewer — Free MVP
 
-A small full-stack web app that helps a human reviewer check a company submission against a regulatory document. The backend extracts requirements from the regulation, retrieves the most relevant passages from the submission via vector search, and asks an LLM to produce a structured per-requirement finding (compliant / partially compliant / non-compliant / not found / needs human review) with evidence quotes, an explanation, a suggested fix, and a risk level.
+A small Next.js web app that helps a human reviewer check a company submission against a regulatory document. The site extracts requirements from the regulation, retrieves the most relevant passages from the submission via local vector search, and asks the user's chosen LLM to produce a structured per-requirement finding (compliant / partially compliant / non-compliant / not found / needs human review) with evidence quotes, an explanation, a suggested fix, and a risk level.
 
 > **Not legal advice.** This tool assists human compliance reviewers. It is not a substitute for qualified legal counsel and must not be used to replace human judgement.
 
-This MVP is intentionally optimised for a **fully free, no-credit-card** deployment:
+## What's "free" about it
+
+This MVP runs **entirely in the user's browser**. There is no server we run, no database we host, no API key we share. The only cost is one free Groq API key per user (no credit card).
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| LLM | **Groq** (Llama 3.3 70B) | Free tier, no card. One key. |
-| Embeddings | **fastembed** (`BAAI/bge-small-en-v1.5`, 384 dim) | ONNX, runs in-process, no key, no rate limits. |
-| Database + vectors | **SQLite + sqlite-vec** | Zero signup, single file, vec0 virtual table for top-k. |
-| Frontend host | **Vercel** | Free, GitHub-connected, auto deploys on push. |
-| Backend host | **Hugging Face Spaces** (Docker SDK) | Free, runs the included `Dockerfile`. |
+| Hosting | **Vercel** (free tier) | Serves the Next.js static + RSC bundle. |
+| LLM | **Groq** (Llama 3.3 70B by default) | Free key, no card, generous rate limit. |
+| Embeddings | **Transformers.js** running `Xenova/bge-small-en-v1.5` (384 dim) | Runs in-browser via WebAssembly; ~70 MB one-time download cached in IndexedDB. |
+| Vector search | **In-memory cosine** over the chunks of the document being reviewed | No DB. Fine for documents up to a few hundred pages. |
+| Persistence | **`localStorage`** | Reports survive on the device that ran the review. Files are never persisted. |
+
+### Privacy
+
+Because everything runs in the browser:
+
+- The original PDF/DOCX/TXT files **never leave the device**.
+- Only short retrieved excerpts (top-k chunks per requirement) are sent to Groq, alongside the requirement text. The full document is not sent.
+- The Groq API key is held only in the browser's `localStorage` and is sent only to `api.groq.com` directly from the user's browser.
+- Generated reports are stored in the same browser's `localStorage`. There is no shared backend that could be subpoenaed or breached.
 
 ## Architecture
 
 ```
-┌──────────────────────┐     HTTPS      ┌────────────────────────┐
-│  Next.js UI (Vercel) │ ─────────────► │  FastAPI on HF Spaces  │
-└──────────────────────┘                └──────────┬─────────────┘
-                                                   │
-                                ┌──────────────────┼─────────────────┐
-                                ▼                  ▼                 ▼
-                       ┌──────────────┐  ┌──────────────────┐  ┌──────────┐
-                       │ Groq LLM API │  │ SQLite +sqlite-vec│  │ fastembed │
-                       │ (Llama 3.3)  │  │ (single file DB) │  │ (in-proc) │
-                       └──────────────┘  └──────────────────┘  └──────────┘
+┌──────────────────────────────────────┐         ┌──────────────────────┐
+│       User's browser (any tab)       │ ──────► │   api.groq.com       │
+│  ┌──────────────────────────────┐    │         │   (LLM only)         │
+│  │ Next.js UI on Vercel         │    │         └──────────────────────┘
+│  │ ─ /settings (key entry)      │    │
+│  │ ─ / (upload + run)           │
+│  │ ─ /reports/[id]              │
+│  └──────────────┬───────────────┘    │
+│                 │                    │
+│   ┌─────────────┴───────────────┐    │
+│   ▼            ▼            ▼   │    │
+│ pdf.js     mammoth      Transformers.js
+│ (PDF)      (DOCX)       (bge-small-en-v1.5, ONNX)
+│   │            │            │   │    │
+│   └────────────┴────────────┘   │    │
+│           in-memory cosine      │    │
+│           top-k retrieval       │    │
+└──────────────────────────────────────┘
 ```
 
 ```
-backend/
-├── app/
-│   ├── main.py                  # FastAPI entrypoint, CORS, /healthz, /disclaimer, init_db()
-│   ├── config.py                # Settings (env vars)
-│   ├── db.py                    # SQLAlchemy engine + sqlite-vec extension loader
-│   ├── deps.py                  # JWT auth dependency
-│   ├── logging_setup.py         # Filter that drops document/prompt content
-│   ├── llm/                     # LLM provider abstraction
-│   │   ├── base.py
-│   │   ├── groq_provider.py     # default
-│   │   ├── openai_provider.py
-│   │   ├── anthropic_provider.py
-│   │   └── fastembed_provider.py
-│   ├── models/                  # SQLAlchemy ORM models (UUIDs, JSON, Enum)
-│   ├── schemas/                 # Pydantic DTOs
-│   ├── routers/                 # auth.py, uploads.py, reports.py
-│   └── services/                # parsing, chunking, requirements,
-│                                # retrieval (sqlite-vec), compliance,
-│                                # pipeline, storage, audit, auth
-└── tests/                       # Unit tests for the deterministic bits
-
 frontend/
 ├── app/
 │   ├── layout.tsx
-│   ├── page.tsx                 # Upload + run review
-│   ├── login/page.tsx           # Register/login + acknowledgement
-│   └── reports/[id]/page.tsx    # Report viewer
+│   ├── page.tsx                  # Upload + run review (client component)
+│   ├── settings/page.tsx         # Groq key entry + acknowledgement
+│   └── reports/[id]/page.tsx     # Report viewer (reads localStorage)
 ├── components/DisclaimerBanner.tsx
-└── lib/api.ts                   # Typed fetch client
-
-Dockerfile                        # Backend container for HF Spaces
-HUGGINGFACE_SPACE_README.md       # Frontmatter you copy into the Space's README
+├── lib/
+│   ├── chunk.ts                  # Token-aware chunker
+│   ├── compliance.ts             # Per-requirement LLM evaluator
+│   ├── embed.ts                  # Transformers.js singleton
+│   ├── groq.ts                   # Groq fetch wrapper (JSON mode)
+│   ├── parse.ts                  # PDF / DOCX / TXT extraction
+│   ├── pipeline.ts               # End-to-end orchestrator
+│   ├── requirements.ts           # Heuristic requirement splitter
+│   ├── retrieval.ts              # In-memory cosine top-k
+│   ├── storage.ts                # localStorage wrappers
+│   └── types.ts                  # Shared finding/report types
+├── next.config.mjs               # Stubs onnxruntime-node out of webpack
+├── tsconfig.json
+├── package.json
+└── vercel.json                   # `framework: nextjs`
 ```
 
 ## Pipeline
 
-1. **Upload** (auth required, server-side extension + size validation).
-2. **Parse** PDF / DOCX / TXT into plain text.
-3. **Extract requirements** from the regulatory document using deterministic heuristics (numbered/bulleted clauses, imperative `shall`/`must` sentences).
-4. **Chunk** the company document into ~500-token windows with 50-token overlap.
-5. **Embed** every requirement and chunk locally with fastembed; chunk vectors are stored in the `company_chunks_vec` virtual table.
-6. **Retrieve** the top-k most similar company chunks for each requirement (cosine distance via sqlite-vec).
-7. **Evaluate** each requirement with Groq. The LLM is given only the retrieved excerpts and is prompted to return a strict JSON object, which the backend coerces into the `ReportFinding` schema.
-8. **Persist** the structured `Report` (status, summary, findings).
-9. **Privacy clean-up**: when `DELETE_SOURCE_FILES_AFTER_PROCESSING=true` (the default), the original uploaded files, requirement rows, chunk rows, *and* their vec0 embeddings are deleted after the report is generated. Only the structured report and audit metadata remain.
+1. **Pick files** (PDF / DOCX / TXT) for the regulatory document and the company submission. They stay in the browser.
+2. **Parse** both files in the browser (`pdfjs-dist`, `mammoth`, `TextDecoder`).
+3. **Extract requirements** from the regulatory document with deterministic heuristics: numbered/bulleted clauses, "Article N" / "Section N" headers, and `shall` / `must` sentences. No LLM call is made for this step — it works offline.
+4. **Chunk** the company document into ~500-token windows with 50-token overlap (word-count approximation, since tiktoken is not bundled in the browser).
+5. **Embed** every requirement and every chunk with `Xenova/bge-small-en-v1.5` via Transformers.js. The model file is downloaded once on first use (~70 MB) and cached in IndexedDB.
+6. **Retrieve** the top-k most similar company chunks for each requirement (in-memory cosine over the L2-normalised vectors).
+7. **Evaluate** each requirement with Groq in JSON mode. The LLM is given only the retrieved excerpts and the requirement text; it returns a strict JSON object that we coerce into the `FindingOut` shape.
+8. **Persist** the structured report to `localStorage` and route to `/reports/[id]`.
 
 ### Report shape
 
 | Field              | Type                                                                                       |
 | ------------------ | ------------------------------------------------------------------------------------------ |
-| `requirement_id`   | string (e.g. `R-1.2`, `R-B003`)                                                            |
+| `requirement_id`   | string (e.g. `R-3.2`, `R-B007`)                                                            |
 | `requirement_text` | string                                                                                     |
-| `status`           | `compliant` \| `non_compliant` \| `partially_compliant` \| `not_found` \| `needs_human_review` |
-| `confidence`       | number in `[0, 1]`                                                                         |
+| `status`           | `compliant` \| `partially_compliant` \| `non_compliant` \| `not_found` \| `needs_human_review` |
+| `confidence`       | float in `[0, 1]`                                                                          |
 | `risk_level`       | `low` \| `medium` \| `high`                                                                |
-| `explanation`      | short string                                                                               |
-| `suggested_fix`    | string                                                                                     |
-| `evidence`         | list of `{ chunk_ordinal, quote }`                                                         |
+| `explanation`      | string (1–3 sentences)                                                                     |
+| `suggested_fix`    | string (empty when compliant)                                                              |
+| `evidence`         | array of `{ chunk_ordinal: number \| null, quote: string }`                                 |
 
-## Privacy & security
+## Deploy to Vercel
 
-- **Never committed to git**: `.env`, `uploads/`, `storage/`, `tmp/`, `data/`, SQLite files, and `*.pdf` / `*.docx` / `*.txt` are all in `.gitignore`.
-- **Secrets only in env vars**: API keys are read from `GROQ_API_KEY` (or `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) and are never echoed in logs or persisted.
-- **No document content in logs**: `app/logging_setup.py` installs a filter that drops any log record carrying `extra={"contains_document": True}` or `contains_prompt=True`, and truncates oversized messages.
-- **No prompt logging**: the compliance pipeline does not log the prompt or response bodies of LLM calls.
-- **Private uploads**: files are stored under `storage/<user_id>/<document_id>.<ext>`; only the uploading user can fetch metadata or trigger a report referencing them.
-- **Deletion after processing** with `DELETE_SOURCE_FILES_AFTER_PROCESSING=true` (default) deletes the file, the requirement rows, the chunk rows, and the vec0 embeddings, then marks the document `deleted`.
-- **Auth required for upload**: `POST /uploads` depends on `get_current_user`.
-- **Acknowledgement at sign-up**: the registration UI requires the user to acknowledge that they will not upload personal or confidential data they are not authorized to share.
-- **Server-side validation**: extension allow-list (`pdf,docx,txt`) and a `MAX_UPLOAD_BYTES` limit, enforced while streaming the body to disk.
-- **Audit log** records who uploaded what, when, and which reports were created/completed/failed (metadata only, no document text).
-- **Do not train**: don't enable any provider-side training on uploaded content. Groq, OpenAI, and Anthropic do not train on API traffic by default; verify on your account.
+1. **Get a free Groq key.** Visit https://console.groq.com/keys → *Create API Key*. No credit card required. Save the key somewhere safe.
+2. **Import this repo into Vercel.** Visit https://vercel.com/new → *Import Git Repository* → pick `marrk797/compliance-reviewer`.
+3. **Set the Root Directory.** In the import wizard (or after the project is created, in *Settings → General*), set **Root Directory = `frontend`**. Without this, Vercel won't detect Next.js because the repository root has no `package.json`.
+4. **Deploy.** No environment variables are required at build time. The Groq key is entered by each user at runtime on `/settings`.
+5. After the first deploy, open the site → it will redirect you to `/settings`. Paste your Groq key, accept the disclaimer, and click *Save and continue*. The key is verified against `api.groq.com` and stored in your browser's `localStorage` only.
 
-## Deploy for free
-
-### 1. Backend on Hugging Face Spaces
-
-1. Get a free Groq key (no card): https://console.groq.com/keys
-2. Sign up at https://huggingface.co/join and create a new Space:
-   https://huggingface.co/new-space
-   - **Owner**: your username
-   - **Space name**: `compliance-reviewer-api` (or anything)
-   - **License**: MIT
-   - **Space SDK**: **Docker** → **Blank**
-   - Visibility: Public or Private
-3. Click **Create Space**.
-4. On the Space page, go to **Settings → Variables and secrets** and add:
-   - `JWT_SECRET` = (a long random string — `python -c "import secrets; print(secrets.token_urlsafe(48))"`)
-   - `GROQ_API_KEY` = your Groq key
-   - `CORS_ORIGINS` = (leave blank for now — you'll fill it in after Vercel deploys)
-5. Push this repo's contents into the Space's git remote:
-   ```bash
-   # In a fresh checkout of this repo:
-   git remote add space https://huggingface.co/spaces/<your-hf-user>/compliance-reviewer-api
-   # The Space's README controls the Space metadata (sdk, port, etc.).
-   # Use the curated frontmatter included in this repo:
-   cp HUGGINGFACE_SPACE_README.md README.md
-   git add README.md && git commit -m "HF Space frontmatter"
-   git push space HEAD:main
-   ```
-   Or, simpler: in the Space's "Files" tab on the website, drag-and-drop the contents of this repo (or just `Dockerfile` + `backend/` + `HUGGINGFACE_SPACE_README.md` renamed to `README.md`).
-6. The Space will build the Docker image (~3-5 min the first time). Once it's "Running", the public URL looks like:
-   `https://<your-hf-user>-compliance-reviewer-api.hf.space`
-   Test it: `curl https://<your-hf-user>-compliance-reviewer-api.hf.space/healthz` → `{"status":"ok"}`
-
-### 2. Frontend on Vercel
-
-1. Sign in at https://vercel.com (free, GitHub auth).
-2. **New Project** → **Import** the GitHub repo `marrk797/compliance-reviewer`.
-3. Configure:
-   - **Root Directory**: `frontend`
-   - **Framework**: Next.js (auto-detected)
-   - **Environment Variables**:
-     - `NEXT_PUBLIC_API_BASE_URL` = the HF Space URL from step 1 (e.g. `https://<user>-compliance-reviewer-api.hf.space`)
-4. Click **Deploy**. Build takes ~1-2 min.
-5. You'll get a URL like `https://compliance-reviewer.vercel.app`.
-
-### 3. Wire CORS
-
-1. Back in the HF Space's **Settings → Variables and secrets**, set `CORS_ORIGINS` to your Vercel URL (e.g. `https://compliance-reviewer.vercel.app,https://compliance-reviewer-<hash>.vercel.app`).
-2. Restart the Space (Settings → Factory rebuild).
-
-You're done. Visit your Vercel URL, register an account, upload a regulatory PDF + a company submission, and run a review.
-
-## Run locally (no deploy)
+## Local development
 
 ```bash
-cp .env.example .env
-# put GROQ_API_KEY=... in .env
-
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn app.main:app --reload   # http://localhost:8000
-
-cd ../frontend
+cd frontend
 npm install
-echo "NEXT_PUBLIC_API_BASE_URL=http://localhost:8000" > .env.local
-npm run dev                     # http://localhost:3000
+npm run dev          # http://localhost:3000
 ```
 
-The first request that needs an embedding will download ~70 MB of model weights into the local fastembed cache; subsequent runs are instant.
+Required: Node 18+. No other tooling, no databases, no Docker.
 
-## Configuration reference
+The first review you run in any browser will block on a one-time ~70 MB download of the embedding model into IndexedDB; subsequent reviews use the cache.
 
-All tunables live in environment variables (see [`.env.example`](./.env.example)):
+## Configuration
 
-| Variable                                 | Default                          | Notes                                                          |
-| ---------------------------------------- | -------------------------------- | -------------------------------------------------------------- |
-| `DATABASE_PATH`                          | `./data/data.sqlite`             | On HF Spaces, set to `/data/data.sqlite` (or `/tmp/data.sqlite` on free tier). |
-| `JWT_SECRET`                             | `change-me`                      | **Always override in production.**                             |
-| `JWT_EXPIRES_MINUTES`                    | `720`                            | 12 h.                                                          |
-| `LLM_PROVIDER`                           | `groq`                           | `groq`, `openai`, or `anthropic`.                              |
-| `LLM_MODEL`                              | `llama-3.3-70b-versatile`        | Provider-specific model id.                                    |
-| `GROQ_API_KEY`                           | _unset_                          | Free at https://console.groq.com/keys                          |
-| `EMBEDDING_PROVIDER`                     | `fastembed`                      | `fastembed` (local) or `openai`.                               |
-| `EMBEDDING_MODEL`                        | `BAAI/bge-small-en-v1.5`         | Must match `EMBEDDING_DIM`.                                    |
-| `EMBEDDING_DIM`                          | `384`                            | Match the chosen embedding model.                              |
-| `DELETE_SOURCE_FILES_AFTER_PROCESSING`   | `true`                           | Privacy mode flag.                                             |
-| `MAX_UPLOAD_BYTES`                       | `20971520`                       | 20 MiB.                                                        |
-| `ALLOWED_UPLOAD_EXTENSIONS`              | `pdf,docx,txt`                   | Server-side allow-list.                                        |
-| `STORAGE_DIR` / `TMP_DIR`                | `./storage` / `./tmp`            | Created automatically; both git-ignored.                       |
-| `CHUNK_TOKEN_SIZE` / `CHUNK_TOKEN_OVERLAP` | `500` / `50`                  | Token-aware chunking (cl100k_base).                            |
-| `RETRIEVAL_TOP_K`                        | `6`                              | Chunks shown to the LLM per requirement.                       |
-| `CORS_ORIGINS`                           | `http://localhost:3000`          | Comma-separated.                                               |
+There are **no build-time environment variables**. All configuration is per-user, runtime, and stored in the browser:
 
-## API reference
+| `localStorage` key                       | What it stores                          | Set on        |
+| ---------------------------------------- | --------------------------------------- | ------------- |
+| `compliance_reviewer:groq_api_key`       | The user's Groq key                     | `/settings`   |
+| `compliance_reviewer:groq_model`         | Override Groq model (default `llama-3.3-70b-versatile`) | `/settings` |
+| `compliance_reviewer:acknowledged`       | "I won't upload confidential data" flag | `/settings`   |
+| `compliance_reviewer:reports`            | The structured reports (no source docs) | After each run |
 
-| Method | Path                  | Auth | Body                                                                    | Returns           |
-| ------ | --------------------- | ---- | ----------------------------------------------------------------------- | ----------------- |
-| POST   | `/auth/register`      | no   | `{ email, password }`                                                   | `UserOut`         |
-| POST   | `/auth/login`         | no   | `{ email, password }`                                                   | `TokenResponse`   |
-| POST   | `/auth/token`         | no   | OAuth2 form (`username`, `password`)                                    | `TokenResponse`   |
-| GET    | `/auth/me`            | yes  | —                                                                       | `UserOut`         |
-| POST   | `/uploads`            | yes  | multipart `kind=regulatory\|company`, `file=<file>`                     | `DocumentOut`     |
-| GET    | `/uploads/{id}`       | yes  | —                                                                       | `DocumentOut`     |
-| POST   | `/reports`            | yes  | `{ regulatory_document_id, company_document_id }`                       | `ReportOut`       |
-| GET    | `/reports`            | yes  | —                                                                       | `ReportOut[]`     |
-| GET    | `/reports/{id}`       | yes  | —                                                                       | `ReportOut`       |
-| GET    | `/healthz`            | no   | —                                                                       | `{ status: "ok" }`|
-| GET    | `/disclaimer`         | no   | —                                                                       | disclaimer text   |
+Clearing the site's localStorage in DevTools (or clicking *Clear local settings* in `/settings`) wipes everything.
 
-## Tests
+## Tech notes
+
+- The `next.config.mjs` aliases `onnxruntime-node$` and `sharp$` to `false` so webpack does not try to bundle Transformers.js' Node-only fallback (which contains `.node` native binaries that webpack cannot parse). This is the configuration recommended by the [Transformers.js Next.js tutorial](https://huggingface.co/docs/transformers.js/tutorials/next).
+- We use `@xenova/transformers@2` rather than `@huggingface/transformers@3` (the rename) because the v3 prebuilt webpack bundle does not currently re-bundle cleanly inside Next.js 14.
+- We use `groq-sdk` with `dangerouslyAllowBrowser: true`. This is acceptable here because each user provides their own key in the UI; there is no shared key embedded in the bundle.
+- PDF.js loads its worker from a CDN URL (`cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs`) so we don't have to wire the worker into Next.js' static asset pipeline.
+
+## Scripts
 
 ```bash
-cd backend
-pytest
+cd frontend
+npm run lint        # ESLint
+npm run typecheck   # tsc --noEmit
+npm run build       # Production build
+npm run dev         # Local dev server on :3000
 ```
 
 ## License
 
-MIT. Provided as-is, without warranty. Review carefully before using on regulated data.
+MIT.
